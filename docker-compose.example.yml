@@ -1,4 +1,8 @@
 services:
+
+  # --- Label resolver (default) ---
+  # Registers each container's own IP using a label on the container.
+
   dockerdns:
     build: .
     restart: unless-stopped
@@ -12,8 +16,42 @@ services:
       LABEL: dns.hostname
       TTL: 60
 
-  # Example workload — will be registered as myapp.example.com
+  # Example workload — will be registered as myapp.example.com -> container IP
   myapp:
     image: nginx
     labels:
       dns.hostname: myapp.example.com
+
+
+  # --- Traefik resolver ---
+  # Registers the proxy's IP for every Host() rule found on each container.
+  # Uncomment and remove the label resolver service above to use this mode.
+
+  # dockerdns-traefik:
+  #   build: .
+  #   restart: unless-stopped
+  #   volumes:
+  #     - /var/run/docker.sock:/var/run/docker.sock:ro
+  #   environment:
+  #     DNS_SERVER: ns1.example.com:53
+  #     DNS_ZONE: example.com.
+  #     DNS_TSIG_KEY: mykey.
+  #     DNS_TSIG_SECRET: <base64-encoded-secret>
+  #     TTL: 60
+  #     REVERSE_PROXY_TYPE: traefik
+  #     REVERSE_PROXY_IP: 10.0.0.5   # IP of the Traefik container/host
+
+  # traefik:
+  #   image: traefik:v3.0
+  #   ports:
+  #     - "80:80"
+  #   volumes:
+  #     - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  # Example workload — Traefik routes Host(`myapp.example.com`) -> this container.
+  # dockerdns will register myapp.example.com -> REVERSE_PROXY_IP (10.0.0.5).
+  # myapp-behind-proxy:
+  #   image: nginx
+  #   labels:
+  #     traefik.enable: "true"
+  #     traefik.http.routers.myapp.rule: "Host(`myapp.example.com`)"

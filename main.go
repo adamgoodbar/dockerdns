@@ -6,18 +6,19 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/docker/docker/client"
 
 	"dockerdns/pkg/dnsupdater"
+	"dockerdns/pkg/resolver"
 	"dockerdns/pkg/watcher"
 )
 
 func main() {
 	server := requireEnv("DNS_SERVER")
 	zone := requireEnv("DNS_ZONE")
-	label := envOr("LABEL", "dns.hostname")
 	ttl := uint32(envInt("TTL", 60))
 
 	var tsig *dnsupdater.TSIGConfig
@@ -34,13 +35,35 @@ func main() {
 	}
 	defer docker.Close()
 
-	u := dnsupdater.New(server, zone, ttl, tsig)
-	w := watcher.New(docker, u, label)
+	var (
+		res            resolver.Resolver
+		proxyContainer string
+	)
+	switch strings.ToLower(os.Getenv("REVERSE_PROXY_TYPE")) {
+	case "traefik":
+		var ip resolver.IPProvider
+		if name := os.Getenv("REVERSE_PROXY_CONTAINER"); name != "" {
+			ip = resolver.NewContainerIP(docker, name)
+			proxyContainer = name
+		} else if staticIP := os.Getenv("REVERSE_PROXY_IP"); staticIP != "" {
+			ip = resolver.NewStaticIP(staticIP)
+		} else {
+			log.Fatal("REVERSE_PROXY_TYPE=traefik requires either REVERSE_PROXY_IP or REVERSE_PROXY_CONTAINER")
+		}
+		res = resolver.NewTraefik(ip)
+		log.Printf("dockerdns started (server=%s zone=%s resolver=traefik ttl=%d)", server, zone, ttl)
+	default:
+		label := envOr("LABEL", "dns.hostname")
+		res = resolver.NewLabel(label)
+		log.Printf("dockerdns started (server=%s zone=%s label=%s ttl=%d)", server, zone, label, ttl)
+	}
+
+	owner := envOr("DOCKERDNS_OWNER", "default")
+	u := dnsupdater.New(server, zone, ttl, tsig, owner)
+	w := watcher.New(docker, u, res, proxyContainer)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-
-	log.Printf("dockerdns started (server=%s zone=%s label=%s ttl=%d)", server, zone, label, ttl)
 
 	if err := w.Run(ctx); err != nil && err != context.Canceled {
 		log.Fatalf("watcher: %v", err)

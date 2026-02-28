@@ -17,47 +17,63 @@ type Updater struct {
 	zone   string
 	ttl    uint32
 	tsig   *TSIGConfig
+	owner  string
 }
 
-func New(server, zone string, ttl uint32, tsig *TSIGConfig) *Updater {
-	return &Updater{server: server, zone: zone, ttl: ttl, tsig: tsig}
+func New(server, zone string, ttl uint32, tsig *TSIGConfig, owner string) *Updater {
+	return &Updater{server: server, zone: zone, ttl: ttl, tsig: tsig, owner: owner}
 }
 
-func (u *Updater) Register(hostname, ip string) error {
-	return u.update(hostname, ip, false)
-}
-
-func (u *Updater) Deregister(hostname, ip string) error {
-	return u.update(hostname, ip, true)
-}
-
-func (u *Updater) update(hostname, ip string, remove bool) error {
+// Register inserts an A record for hostname and a TXT ownership record at
+// dockerdns-{hostname} in a single DNS UPDATE message.
+func (u *Updater) Register(hostname, ip, resource string) error {
 	msg := new(mdns.Msg)
 	msg.SetUpdate(mdns.Fqdn(u.zone))
 
 	fqdn := mdns.Fqdn(hostname)
-
-	if remove {
-		rr := &mdns.RR_Header{
+	a := &mdns.A{
+		Hdr: mdns.RR_Header{
 			Name:   fqdn,
-			Rrtype: mdns.TypeANY,
-			Class:  mdns.ClassANY,
-			Ttl:    0,
-		}
-		msg.RemoveName([]mdns.RR{&mdns.ANY{Hdr: *rr}})
-	} else {
-		a := &mdns.A{
-			Hdr: mdns.RR_Header{
-				Name:   fqdn,
-				Rrtype: mdns.TypeA,
-				Class:  mdns.ClassINET,
-				Ttl:    u.ttl,
-			},
-			A: net.ParseIP(ip).To4(),
-		}
-		msg.Insert([]mdns.RR{a})
+			Rrtype: mdns.TypeA,
+			Class:  mdns.ClassINET,
+			Ttl:    u.ttl,
+		},
+		A: net.ParseIP(ip).To4(),
 	}
 
+	txtFqdn := mdns.Fqdn("dockerdns-" + hostname)
+	txt := &mdns.TXT{
+		Hdr: mdns.RR_Header{
+			Name:   txtFqdn,
+			Rrtype: mdns.TypeTXT,
+			Class:  mdns.ClassINET,
+			Ttl:    u.ttl,
+		},
+		Txt: []string{
+			fmt.Sprintf("heritage=dockerdns,dockerdns/owner=%s,dockerdns/resource=%s", u.owner, resource),
+		},
+	}
+
+	msg.Insert([]mdns.RR{a, txt})
+	return u.send(msg)
+}
+
+// Deregister removes all records at hostname and at dockerdns-{hostname}.
+func (u *Updater) Deregister(hostname, ip string) error {
+	msg := new(mdns.Msg)
+	msg.SetUpdate(mdns.Fqdn(u.zone))
+
+	fqdn := mdns.Fqdn(hostname)
+	txtFqdn := mdns.Fqdn("dockerdns-" + hostname)
+
+	msg.RemoveName([]mdns.RR{
+		&mdns.ANY{Hdr: mdns.RR_Header{Name: fqdn, Rrtype: mdns.TypeANY, Class: mdns.ClassANY}},
+		&mdns.ANY{Hdr: mdns.RR_Header{Name: txtFqdn, Rrtype: mdns.TypeANY, Class: mdns.ClassANY}},
+	})
+	return u.send(msg)
+}
+
+func (u *Updater) send(msg *mdns.Msg) error {
 	if u.tsig != nil {
 		msg.SetTsig(u.tsig.Key, mdns.HmacSHA256, 300, 0)
 	}
